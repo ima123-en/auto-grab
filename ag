@@ -1,0 +1,405 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer = Players.LocalPlayer
+
+pcall(function()
+    if game.CoreGui:FindFirstChild("SchmecktAutoGrabGUI") then
+        game.CoreGui:FindFirstChild("SchmecktAutoGrabGUI"):Destroy()
+    end
+end)
+
+if getgenv().SchmecktAutoGrab then
+    pcall(function() getgenv().SchmecktAutoGrab.Disable() end)
+end
+
+getgenv().SchmecktAutoGrab = {
+    Active = true,
+    Radius = 8,
+    IsStealing = false,
+    StealProgress = 0,
+    CurrentTarget = nil,
+    LastTargetUID = nil,
+    StealCache = {},
+    StealDuration = 0.5,
+    Connection = nil,
+    CircleParts = {}
+}
+
+local AG = getgenv().SchmecktAutoGrab
+
+local PART_COUNT = 40
+local PART_THICKNESS = 0.3
+local PART_HEIGHT = 0.2
+local PART_COLOR = Color3.fromRGB(138, 43, 226)
+
+local Packages = ReplicatedStorage:WaitForChild("Packages")
+local Synchronizer = require(Packages:WaitForChild("Synchronizer"))
+
+local function getHRP()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    return char:FindFirstChild("HumanoidRootPart")
+end
+
+local function isMyBase(plotName)
+    local plots = Workspace:FindFirstChild("Plots")
+    if not plots then return false end
+    local plot = plots:FindFirstChild(plotName)
+    if not plot then return false end
+    local channel = Synchronizer:Get(plot.Name)
+    if channel then
+        local owner = channel:Get("Owner")
+        if owner then
+            if typeof(owner) == "Instance" and owner:IsA("Player") then
+                return owner.UserId == LocalPlayer.UserId
+            elseif typeof(owner) == "table" and owner.UserId then
+                return owner.UserId == LocalPlayer.UserId
+            end
+        end
+    end
+    local sign = plot:FindFirstChild("PlotSign")
+    if sign then
+        local yourBase = sign:FindFirstChild("YourBase")
+        if yourBase and yourBase:IsA("BillboardGui") then
+            return yourBase.Enabled == true
+        end
+    end
+    return false
+end
+
+local function findAllStealPrompts()
+    local prompts = {}
+    local plots = Workspace:FindFirstChild("Plots")
+    if not plots then return prompts end
+    for _, plot in ipairs(plots:GetChildren()) do
+        if isMyBase(plot.Name) then continue end
+        local podiums = plot:FindFirstChild("AnimalPodiums")
+        if podiums then
+            for _, podium in ipairs(podiums:GetChildren()) do
+                local base = podium:FindFirstChild("Base")
+                if base then
+                    local spawn = base:FindFirstChild("Spawn")
+                    if spawn then
+                        local attach = spawn:FindFirstChild("PromptAttachment")
+                        if attach then
+                            for _, p in ipairs(attach:GetChildren()) do
+                                if p:IsA("ProximityPrompt") and p.Enabled then
+                                    table.insert(prompts, {
+                                        prompt = p,
+                                        position = spawn.Position,
+                                        uid = plot.Name .. "_" .. podium.Name
+                                    })
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return prompts
+end
+
+local function getNearestStealPrompt()
+    local hrp = getHRP()
+    if not hrp then return nil, math.huge end
+    local prompts = findAllStealPrompts()
+    local nearest = nil
+    local minDist = math.huge
+    for _, data in ipairs(prompts) do
+        local dist = (hrp.Position - data.position).Magnitude
+        if dist < minDist then
+            minDist = dist
+            nearest = data
+        end
+    end
+    return nearest, minDist
+end
+
+local function buildStealCallbacks(prompt)
+    if AG.StealCache[prompt] then return true end
+    local data = {
+        holdCallbacks = {},
+        triggerCallbacks = {},
+        ready = true,
+    }
+    local ok1, conns1 = pcall(getconnections, prompt.PromptButtonHoldBegan)
+    if ok1 and type(conns1) == "table" then
+        for _, conn in ipairs(conns1) do
+            if type(conn.Function) == "function" then
+                table.insert(data.holdCallbacks, conn.Function)
+            end
+        end
+    end
+    local ok2, conns2 = pcall(getconnections, prompt.Triggered)
+    if ok2 and type(conns2) == "table" then
+        for _, conn in ipairs(conns2) do
+            if type(conn.Function) == "function" then
+                table.insert(data.triggerCallbacks, conn.Function)
+            end
+        end
+    end
+    if (#data.holdCallbacks > 0) or (#data.triggerCallbacks > 0) then
+        AG.StealCache[prompt] = data
+        return true
+    end
+    return false
+end
+
+local function executeAutoGrabSteal(prompt, targetData)
+    if not prompt or not prompt.Parent then return false end
+    buildStealCallbacks(prompt)
+    local data = AG.StealCache[prompt]
+    if not data or not data.ready then return false end
+    data.ready = false
+    AG.IsStealing = true
+    AG.StealProgress = 0
+    AG.CurrentTarget = targetData
+    task.spawn(function()
+        if #data.holdCallbacks > 0 then
+            for _, fn in ipairs(data.holdCallbacks) do
+                task.spawn(fn)
+            end
+        end
+        local startTime = tick()
+        while tick() - startTime < AG.StealDuration do
+            AG.StealProgress = (tick() - startTime) / AG.StealDuration
+            task.wait(0.03)
+        end
+        AG.StealProgress = 1
+        if #data.triggerCallbacks > 0 then
+            for _, fn in ipairs(data.triggerCallbacks) do
+                task.spawn(fn)
+            end
+        end
+        task.wait(0.1)
+        data.ready = true
+        task.wait(0.2)
+        AG.IsStealing = false
+        AG.StealProgress = 0
+        AG.CurrentTarget = nil
+    end)
+    return true
+end
+
+local function createCircle()
+    for _, part in ipairs(AG.CircleParts) do
+        if part then part:Destroy() end
+    end
+    AG.CircleParts = {}
+    local points = {}
+    for i = 0, PART_COUNT - 1 do
+        local angle = math.rad(i * 360 / PART_COUNT)
+        table.insert(points, Vector3.new(math.cos(angle), 0, math.sin(angle)) * AG.Radius)
+    end
+    for i = 1, #points do
+        local nextIndex = i % #points + 1
+        local p1 = points[i]
+        local p2 = points[nextIndex]
+        local part = Instance.new("Part")
+        part.Anchored = true
+        part.CanCollide = false
+        part.Size = Vector3.new((p2 - p1).Magnitude, PART_HEIGHT, PART_THICKNESS)
+        part.Color = PART_COLOR
+        part.Material = Enum.Material.Neon
+        part.Transparency = 0.3
+        part.TopSurface = Enum.SurfaceType.Smooth
+        part.BottomSurface = Enum.SurfaceType.Smooth
+        part.Parent = workspace
+        table.insert(AG.CircleParts, part)
+    end
+end
+
+local function updateCircle()
+    if not AG.Active then
+        for _, part in ipairs(AG.CircleParts) do
+            if part then part.Transparency = 1 end
+        end
+        return
+    end
+    local char = LocalPlayer.Character
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    local points = {}
+    for i = 0, PART_COUNT - 1 do
+        local angle = math.rad(i * 360 / PART_COUNT)
+        table.insert(points, Vector3.new(math.cos(angle), 0, math.sin(angle)) * AG.Radius)
+    end
+    for i, part in ipairs(AG.CircleParts) do
+        if i > #points then break end
+        local nextIndex = i % #points + 1
+        local p1 = points[i]
+        local p2 = points[nextIndex]
+        local center = (p1 + p2) / 2 + root.Position
+        part.Size = Vector3.new((p2 - p1).Magnitude, PART_HEIGHT, PART_THICKNESS)
+        part.CFrame = CFrame.new(center, center + Vector3.new(p2.X - p1.X, 0, p2.Z - p1.Z)) * CFrame.Angles(0, math.pi / 2, 0)
+        part.Transparency = 0.3
+    end
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "SchmecktAutoGrabGUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Parent = game.CoreGui
+AG.ScreenGui = ScreenGui
+
+local ProgressFrame = Instance.new("Frame")
+ProgressFrame.Size = UDim2.new(0, 280, 0, 28)
+ProgressFrame.Position = UDim2.new(0.5, -140, 0, 14)
+ProgressFrame.BackgroundColor3 = Color3.fromRGB(12, 12, 12)
+ProgressFrame.BackgroundTransparency = 0.15
+ProgressFrame.BorderSizePixel = 0
+ProgressFrame.Parent = ScreenGui
+Instance.new("UICorner", ProgressFrame).CornerRadius = UDim.new(0, 8)
+Instance.new("UIStroke", ProgressFrame).Color = Color3.fromRGB(138, 43, 226)
+
+local ProgLabel = Instance.new("TextLabel")
+ProgLabel.Size = UDim2.new(0, 40, 1, 0)
+ProgLabel.Position = UDim2.new(0, 6, 0, 0)
+ProgLabel.BackgroundTransparency = 1
+ProgLabel.Text = "GRAB"
+ProgLabel.TextColor3 = Color3.fromRGB(200, 120, 255)
+ProgLabel.Font = Enum.Font.GothamBlack
+ProgLabel.TextSize = 10
+ProgLabel.TextXAlignment = Enum.TextXAlignment.Left
+ProgLabel.Parent = ProgressFrame
+
+local StatusLabel = Instance.new("TextLabel")
+StatusLabel.Size = UDim2.new(0, 50, 1, 0)
+StatusLabel.Position = UDim2.new(0, 42, 0, 0)
+StatusLabel.BackgroundTransparency = 1
+StatusLabel.Text = "SCAN"
+StatusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+StatusLabel.Font = Enum.Font.GothamBold
+StatusLabel.TextSize = 9
+StatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+StatusLabel.Parent = ProgressFrame
+
+local ProgBarBg = Instance.new("Frame")
+ProgBarBg.Size = UDim2.new(0, 110, 0, 10)
+ProgBarBg.Position = UDim2.new(0, 88, 0.5, -5)
+ProgBarBg.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+ProgBarBg.BorderSizePixel = 0
+ProgBarBg.Parent = ProgressFrame
+Instance.new("UICorner", ProgBarBg).CornerRadius = UDim.new(1, 0)
+Instance.new("UIStroke", ProgBarBg).Color = Color3.fromRGB(60, 60, 60)
+
+local ProgFill = Instance.new("Frame")
+ProgFill.Size = UDim2.new(0, 0, 1, 0)
+ProgFill.BackgroundColor3 = Color3.fromRGB(138, 43, 226)
+ProgFill.BorderSizePixel = 0
+ProgFill.Parent = ProgBarBg
+Instance.new("UICorner", ProgFill).CornerRadius = UDim.new(1, 0)
+Instance.new("UIGradient", ProgFill).Color = ColorSequence.new{
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(138, 43, 226)),
+    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(220, 150, 255)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(138, 43, 226))
+}
+
+local ProgPercent = Instance.new("TextLabel")
+ProgPercent.Size = UDim2.new(0, 30, 1, 0)
+ProgPercent.Position = UDim2.new(0, 200, 0, 0)
+ProgPercent.BackgroundTransparency = 1
+ProgPercent.Text = "0%"
+ProgPercent.TextColor3 = Color3.fromRGB(255, 255, 255)
+ProgPercent.Font = Enum.Font.GothamBold
+ProgPercent.TextSize = 9
+ProgPercent.TextXAlignment = Enum.TextXAlignment.Center
+ProgPercent.Parent = ProgressFrame
+
+local AutoGrabRadiusInput = Instance.new("TextBox")
+AutoGrabRadiusInput.Size = UDim2.new(0, 35, 0, 16)
+AutoGrabRadiusInput.Position = UDim2.new(0, 235, 0.5, -8)
+AutoGrabRadiusInput.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+AutoGrabRadiusInput.Text = tostring(AG.Radius)
+AutoGrabRadiusInput.TextColor3 = Color3.fromRGB(138, 43, 226)
+AutoGrabRadiusInput.Font = Enum.Font.GothamBold
+AutoGrabRadiusInput.TextSize = 10
+AutoGrabRadiusInput.ClearTextOnFocus = false
+AutoGrabRadiusInput.Parent = ProgressFrame
+Instance.new("UICorner", AutoGrabRadiusInput).CornerRadius = UDim.new(0, 4)
+Instance.new("UIStroke", AutoGrabRadiusInput).Color = Color3.fromRGB(138, 43, 226)
+
+AutoGrabRadiusInput.FocusLost:Connect(function()
+    local num = tonumber(AutoGrabRadiusInput.Text)
+    if num then
+        AG.Radius = math.clamp(num, 1, 50)
+        AutoGrabRadiusInput.Text = tostring(AG.Radius)
+        createCircle()
+    else
+        AutoGrabRadiusInput.Text = tostring(AG.Radius)
+    end
+end)
+
+task.spawn(function()
+    while AG.Active do
+        task.wait(0.03)
+        if AG.IsStealing then
+            ProgFill.Size = UDim2.new(AG.StealProgress, 0, 1, 0)
+            ProgPercent.Text = math.floor(AG.StealProgress * 100) .. "%"
+            StatusLabel.Text = "GRAB"
+            StatusLabel.TextColor3 = Color3.fromRGB(255, 200, 100)
+        else
+            if ProgFill.Size.X.Scale > 0 then
+                ProgFill.Size = UDim2.new(math.max(0, ProgFill.Size.X.Scale - 0.05), 0, 1, 0)
+            end
+            ProgPercent.Text = "0%"
+            StatusLabel.Text = "SCAN"
+            StatusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+        end
+    end
+end)
+
+AG.Connection = RunService.Heartbeat:Connect(function()
+    if not AG.Active then return end
+    if AG.IsStealing then return end
+    local targetData, dist = getNearestStealPrompt()
+    if not targetData then return end
+    local hrp = getHRP()
+    if not hrp then return end
+    if dist > AG.Radius then return end
+    if AG.LastTargetUID ~= targetData.uid then
+        AG.LastTargetUID = targetData.uid
+    end
+    local prompt = targetData.prompt
+    if prompt and prompt.Parent then
+        executeAutoGrabSteal(prompt, targetData)
+    end
+end)
+
+createCircle()
+pcall(function() RunService:UnbindFromRenderStep("SchmecktAutoGrabCircle") end)
+RunService:BindToRenderStep("SchmecktAutoGrabCircle", Enum.RenderPriority.Camera.Value + 1, updateCircle)
+
+LocalPlayer.CharacterAdded:Connect(function()
+    AG.LastTargetUID = nil
+    task.wait(0.5)
+    createCircle()
+end)
+
+function AG.Disable()
+    AG.Active = false
+    if AG.Connection then 
+        AG.Connection:Disconnect() 
+        AG.Connection = nil 
+    end
+    for _, part in ipairs(AG.CircleParts) do
+        if part then part:Destroy() end
+    end
+    AG.CircleParts = {}
+    pcall(function() RunService:UnbindFromRenderStep("SchmecktAutoGrabCircle") end)
+    if AG.ScreenGui then
+        AG.ScreenGui:Destroy()
+    end
+end
+
+function AG.SetRadius(radius)
+    AG.Radius = math.clamp(radius, 1, 50)
+    AutoGrabRadiusInput.Text = tostring(AG.Radius)
+    createCircle()
+end
+
+return AG
