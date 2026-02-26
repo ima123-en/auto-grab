@@ -16,7 +16,7 @@ end
 
 getgenv().SchmecktAutoGrab = {
     Active = true,
-    Radius = 8,
+    Radius = 15,
     IsStealing = false,
     StealProgress = 0,
     CurrentTarget = nil,
