@@ -22,7 +22,7 @@ getgenv().SchmecktAutoGrab = {
     CurrentTarget = nil,
     LastTargetUID = nil,
     StealCache = {},
-    StealDuration = 0.5,
+    StealDuration = 0.4,
     Connection = nil,
     CircleParts = {}
 }
